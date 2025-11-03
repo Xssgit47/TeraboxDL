@@ -164,8 +164,10 @@ async def send_file_to_user_and_group(context, chat_id, admin_group_id, file_inf
             try:
                 await context.bot.send_message(admin_group_id, admin_msg, parse_mode="MarkdownV2")
             except BadRequest:
-                # Fallback plain text
-                await context.bot.send_message(admin_group_id, f"New Folder Request:\nUser: {user.full_name} (id:{user.id})\nURL: {file_url}\n\n{msg_text.replace('\\\\', '').replace('\\[', '[').replace('\\]', ']').replace('\\(', '(').replace('\\)', ')')}")
+                # Fallback plain text: Unescape outside f-string
+                clean_msg = msg_text.replace('\\\\', '').replace('\\[', '[').replace('\\]', ']').replace('\\(', '(').replace('\\)', ')')
+                plain_admin = f"New Folder Request:\nUser: {user.full_name} (id:{user.id})\nURL: {file_url}\n\n{clean_msg}"
+                await context.bot.send_message(admin_group_id, plain_admin)
         return
 
     try:
@@ -185,7 +187,7 @@ async def send_file_to_user_and_group(context, chat_id, admin_group_id, file_inf
                 'Referer': 'https://www.terabox.com/'
             }
             try:
-                response = requests.get(dlink, stream=True, timeout=120, headers=headers)  # Increased timeout + headers
+                response = requests.get(dlink, stream=True, timeout=120, headers=headers)
                 response.raise_for_status()
                 with open(local_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
@@ -230,8 +232,9 @@ async def send_file_to_user_and_group(context, chat_id, admin_group_id, file_inf
                     )
                 except BadRequest as e:
                     log.warning(f"Admin video send failed: {e}")
-                    # Fallback plain admin message
-                    plain_admin = f"ADMIN REVIEW\n{caption.replace('\\\\', '').replace('\\[', '[').replace('\\]', ']').replace('\\(', '(').replace('\\)', ')').replace('\\*', '*')}\nRequested by: {user.full_name} (tg://user?id={user.id})\nURL: {file_url}"
+                    # Fallback plain: Unescape outside f-string
+                    clean_caption = caption.replace('\\\\', '').replace('\\[', '[').replace('\\]', ']').replace('\\(', '(').replace('\\)', ')').replace('\\*', '*')
+                    plain_admin = f"ADMIN REVIEW\n{clean_caption}\nRequested by: {user.full_name} (tg://user?id={user.id})\nURL: {file_url}"
                     await context.bot.send_message(admin_group_id, plain_admin)
             return
 
@@ -244,7 +247,10 @@ async def send_file_to_user_and_group(context, chat_id, admin_group_id, file_inf
                 try:
                     await context.bot.send_photo(admin_group_id, photo=dlink, caption=admin_caption, parse_mode="MarkdownV2")
                 except BadRequest:
-                    await context.bot.send_message(admin_group_id, f"ADMIN REVIEW\n{caption.replace('\\\\', '').replace('\\*', '*')}\nRequested by: {user.full_name}\nURL: {file_url}")
+                    # Fallback plain
+                    clean_caption = caption.replace('\\\\', '').replace('\\[', '[').replace('\\]', ']').replace('\\(', '(').replace('\\)', ')').replace('\\*', '*')
+                    plain_admin = f"ADMIN REVIEW\n{clean_caption}\nRequested by: {user.full_name}\nURL: {file_url}"
+                    await context.bot.send_message(admin_group_id, plain_admin)
         else:
             msg_text = f"\\[{name_escaped}\\]\\({dlink_escaped}\\)\nSize: {size_escaped}\n{BRAND}"
             await context.bot.send_message(chat_id, msg_text, parse_mode="MarkdownV2", disable_web_page_preview=True)
@@ -253,7 +259,10 @@ async def send_file_to_user_and_group(context, chat_id, admin_group_id, file_inf
                 try:
                     await context.bot.send_message(admin_group_id, admin_msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
                 except BadRequest:
-                    await context.bot.send_message(admin_group_id, f"New File Request:\nUser: {user.full_name}\nURL: {file_url}\n\n{name}: {dlink}\nSize: {size}\n{BRAND}")
+                    # Fallback plain: Unescape outside f-string
+                    clean_msg = msg_text.replace('\\\\', '').replace('\\[', '[').replace('\\]', ']').replace('\\(', '(').replace('\\)', ')').replace('\\*', '*')
+                    plain_admin = f"New File Request:\nUser: {user.full_name}\nURL: {file_url}\n\n{clean_msg}"
+                    await context.bot.send_message(admin_group_id, plain_admin)
 
     except Exception as e:
         log.error(f"Send error for {name}: {e}")
@@ -264,7 +273,6 @@ async def send_file_to_user_and_group(context, chat_id, admin_group_id, file_inf
             admin_fallback = f"New File Request (fallback):\nUser: {user.full_name}\nURL: {file_url}\n\n{fallback}"
             await context.bot.send_message(admin_group_id, admin_fallback)
 
-# ... (rest of the code remains the same as previous version: terabox_cmd, stats, ban, unban, broadcast, error_handler, main)
 async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_joined(update, context):
         await prompt_force_join(update)
