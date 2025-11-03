@@ -9,6 +9,7 @@ from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes
 )
+from telegram.helpers import escape_markdown
 from dotenv import load_dotenv
 
 # -------------------------
@@ -173,7 +174,12 @@ async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     file_url = context.args[0].strip()
     reply = fetch_terabox(file_url)
-    await update.effective_message.reply_text(f"{reply}\n{BRAND}", parse_mode="Markdown")
+    
+    # Escape the reply so Markdown entities do not break message formatting
+    from telegram.helpers import escape_markdown
+    safe_reply = escape_markdown(reply, version=2)
+    
+    await update.effective_message.reply_text(f"{safe_reply}\n{BRAND}", parse_mode="MarkdownV2")
 
     # Forward to review group (if configured)
     if ADMIN_GROUP_ID is not None:
@@ -182,9 +188,9 @@ async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 ADMIN_GROUP_ID,
                 f"🔎 *New File Request:*\n"
-                f"User: [{user.full_name}](tg://user?id={user.id})\n"
-                f"URL: {file_url}\n\n{BRAND}",
-                parse_mode="Markdown",
+                f"User: [{escape_markdown(user.full_name, 2)}](tg://user?id={user.id})\n"
+                f"URL: `{escape_markdown(file_url, 2)}`\n\n{BRAND}",
+                parse_mode="MarkdownV2",
                 disable_web_page_preview=True,
             )
         except TelegramError as e:
