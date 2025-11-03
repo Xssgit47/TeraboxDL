@@ -9,8 +9,9 @@ from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes
 )
-from telegram.helpers import escape_markdown
+from telegram.helpers import escape_markdown  # <- Add this import here
 from dotenv import load_dotenv
+
 
 # -------------------------
 # Setup & configuration
