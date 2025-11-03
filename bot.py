@@ -2,15 +2,13 @@ import os
 import logging
 import time
 import requests
-import tempfile
 import asyncio
+import tempfile
 from collections import defaultdict
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import BadRequest, Forbidden, TelegramError
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from telegram.helpers import escape_markdown
 from dotenv import load_dotenv
 
@@ -51,7 +49,7 @@ WELCOME_MSG = f"""
 This bot fetches Terabox links with a clean, stylish flow.
 
 ✨ Features:
-- Direct video/photo upload if possible from Terabox (using local VPS download & re-upload)
+- Direct upload of video/photo from Terabox (downloading to VPS first)
 - Admin review forwarding
 - Anti-spam protection
 - Force-join channel check
@@ -62,7 +60,7 @@ This bot fetches Terabox links with a clean, stylish flow.
 HELP_MSG = f"""**User Commands:**
 /start - Welcome & Info
 /help - List commands
-/terabox <URL> - Fetch direct media or download links from Terabox
+/terabox <URL> - Get direct media or safe file links from Terabox
 
 **Admin Commands:**
 /stats - Bot stats
@@ -123,7 +121,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(HELP_MSG, parse_mode="Markdown")
 
-def download_and_upload(context, chat_id, admin_group_id, file_info, user, file_url):
+async def send_media(context, chat_id, admin_group_id, file_info, user, file_url):
     name = file_info.get("name", "File")
     size = file_info.get("size", "")
     dlink = file_info.get("dlink", "")
@@ -131,49 +129,49 @@ def download_and_upload(context, chat_id, admin_group_id, file_info, user, file_
     extension = os.path.splitext(dlink)[-1].lower()
     caption = f"📁 {name}\nSize: {size}\n{BRAND}"
 
+    # Only try to send for direct file links, not folders
     if isdir or not dlink:
-        msg_text = f"Folder: {name}\nSize: {size}\n{BRAND}\n{dlink}"
-        context.bot.send_message(chat_id, msg_text, disable_web_page_preview=False)
+        info_msg = f"{name}\nSize: {size}\n{BRAND}\n{dlink}"
+        await context.bot.send_message(chat_id, info_msg)
         if admin_group_id:
-            admin_msg = (
-                f"🔎 ADMIN REVIEW\nUser: {user.full_name}\nURL: {file_url}\n\n{msg_text}"
-            )
-            context.bot.send_message(admin_group_id, admin_msg)
+            await context.bot.send_message(admin_group_id, f"🔎 ADMIN REVIEW\nUser: {user.full_name}\nURL: {file_url}\n\n{info_msg}")
         return
 
     try:
-        # Download file and send as media (Telegram allows ≤2GB for videos, ≤20MB for images)
         with tempfile.NamedTemporaryFile(delete=True) as temp_file:
-            r = requests.get(dlink, stream=True, timeout=60)
+            r = requests.get(dlink, stream=True, timeout=120)
             r.raise_for_status()
+            total = 0
             for chunk in r.iter_content(chunk_size=1048576):
                 temp_file.write(chunk)
+                total += len(chunk)
+                if total > 2_000_000_000 and extension in ('.mp4', '.mkv', '.mov', '.webm', '.avi'):
+                    raise Exception("File too large for Telegram video (2GB limit)")
+                if total > 20_000_000 and extension in ('.jpg', '.jpeg', '.png', '.gif'):
+                    raise Exception("File too large for Telegram photo (20MB limit)")
             temp_file.flush()
-            # Video (max 2GB)
+            # Send video/photo if possible
             if extension in ('.mp4', '.mkv', '.mov', '.webm', '.avi'):
-                context.bot.send_video(chat_id=chat_id, video=open(temp_file.name, 'rb'), caption=caption)
+                await context.bot.send_video(chat_id=chat_id, video=open(temp_file.name, 'rb'), caption=caption)
                 if admin_group_id:
-                    context.bot.send_video(chat_id=admin_group_id, video=open(temp_file.name, 'rb'),
+                    await context.bot.send_video(chat_id=admin_group_id, video=open(temp_file.name, 'rb'),
                         caption=f"🔎 ADMIN REVIEW\n{caption}\nRequested by: {user.full_name}\nURL: {file_url}")
-            # Image (max 20MB)
             elif extension in ('.jpg', '.jpeg', '.png', '.gif'):
-                context.bot.send_photo(chat_id=chat_id, photo=open(temp_file.name, 'rb'), caption=caption)
+                await context.bot.send_photo(chat_id=chat_id, photo=open(temp_file.name, 'rb'), caption=caption)
                 if admin_group_id:
-                    context.bot.send_photo(chat_id=admin_group_id, photo=open(temp_file.name, 'rb'),
+                    await context.bot.send_photo(chat_id=admin_group_id, photo=open(temp_file.name, 'rb'),
                         caption=f"🔎 ADMIN REVIEW\n{caption}\nRequested by: {user.full_name}\nURL: {file_url}")
             else:
-                msg_text = f"{name}\nSize: {size}\n{BRAND}\n{dlink}"
-                context.bot.send_message(chat_id, msg_text, disable_web_page_preview=True)
+                # Send file link fallback
+                info_msg = f"{name}\nSize: {size}\n{BRAND}\n{dlink}"
+                await context.bot.send_message(chat_id, info_msg)
                 if admin_group_id:
-                    admin_msg = f"🔎 ADMIN REVIEW\nUser: {user.full_name}\nURL: {file_url}\n\n{msg_text}"
-                    context.bot.send_message(admin_group_id, admin_msg)
+                    await context.bot.send_message(admin_group_id, f"🔎 ADMIN REVIEW\nUser: {user.full_name}\nURL: {file_url}\n\n{info_msg}")
     except Exception as e:
-        # Fallback: send download link
-        msg_text = f"{name}\nSize: {size}\n{BRAND}\n{dlink}\n(File transfer failed: {e})"
-        context.bot.send_message(chat_id, msg_text, disable_web_page_preview=True)
+        fail_msg = f"{name}\nSize: {size}\n{BRAND}\n{dlink}\n(File transfer failed: {e})"
+        await context.bot.send_message(chat_id, fail_msg)
         if admin_group_id:
-            admin_msg = f"🔎 ADMIN REVIEW\nUser: {user.full_name}\nURL: {file_url}\n\n{msg_text}"
-            context.bot.send_message(admin_group_id, admin_msg)
+            await context.bot.send_message(admin_group_id, f"🔎 ADMIN REVIEW\nUser: {user.full_name}\nURL: {file_url}\n\n{fail_msg}")
 
 async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_joined(update, context):
@@ -200,11 +198,8 @@ async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
     if data and data.get("success") and data.get("files"):
-        loop = asyncio.get_running_loop()
         for file_info in data["files"]:
-            await loop.run_in_executor(
-                None, download_and_upload, context, chat_id, ADMIN_GROUP_ID, file_info, user, file_url
-            )
+            await send_media(context, chat_id, ADMIN_GROUP_ID, file_info, user, file_url)
     else:
         await update.effective_message.reply_text(f"{reply}\n{BRAND}")
 
