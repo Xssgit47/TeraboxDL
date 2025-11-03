@@ -9,13 +9,9 @@ from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes
 )
-from telegram.helpers import escape_markdown  # <- Add this import here
+from telegram.helpers import escape_markdown  # Correctly imported at top level now
 from dotenv import load_dotenv
 
-
-# -------------------------
-# Setup & configuration
-# -------------------------
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -164,9 +160,7 @@ async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             caption = f"📁 *{escape_markdown(name,2)}*\nSize: {escape_markdown(size,2)}\n{BRAND}"
 
-            # Only send direct media, not folders
             if isdir:
-                # For folders, send a clickable link
                 msg_text = f"Folder: [{escape_markdown(name,2)}]({escape_markdown(dlink,2)})\nSize: {escape_markdown(size,2)}\n{BRAND}"
                 await update.effective_message.reply_text(msg_text, parse_mode="MarkdownV2", disable_web_page_preview=False)
                 if ADMIN_GROUP_ID:
@@ -178,14 +172,12 @@ async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     await context.bot.send_message(ADMIN_GROUP_ID, admin_msg, parse_mode="MarkdownV2")
             else:
-                # For files, try to send media/video/photo files
                 try:
                     if dlink.endswith((".mp4", ".mkv", ".avi", ".mov", ".webm")):
                         await update.effective_message.reply_video(video=dlink, caption=caption, parse_mode="MarkdownV2", supports_streaming=True)
                     elif dlink.endswith((".jpg", ".jpeg", ".png", ".gif")):
                         await update.effective_message.reply_photo(photo=dlink, caption=caption, parse_mode="MarkdownV2")
                     else:
-                        # Fallback: send direct download link as clickable text
                         msg_text = f"[{escape_markdown(name,2)}]({escape_markdown(dlink,2)})\nSize: {escape_markdown(size,2)}\n{BRAND}"
                         await update.effective_message.reply_text(msg_text, parse_mode="MarkdownV2", disable_web_page_preview=True)
 
@@ -198,7 +190,6 @@ async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                         await context.bot.send_message(ADMIN_GROUP_ID, admin_msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
                 except Exception as e:
-                    # In case sending media fails, send the link as text
                     msg_text = f"[{escape_markdown(name,2)}]({escape_markdown(dlink,2)})\nSize: {escape_markdown(size,2)}\n{BRAND}"
                     await update.effective_message.reply_text(msg_text, parse_mode="MarkdownV2", disable_web_page_preview=True)
                     if ADMIN_GROUP_ID:
@@ -211,14 +202,11 @@ async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_message(ADMIN_GROUP_ID, admin_msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
 
     else:
-        # fallback: send raw API response (escaped)
-        from telegram.helpers import escape_markdown
         safe_reply = escape_markdown(reply, version=2)
         await update.effective_message.reply_text(f"{safe_reply}\n{BRAND}", parse_mode="MarkdownV2")
 
     return
 
-# Admin commands (stubs for ban/unban storage)
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.effective_message.reply_text("Access denied.")
