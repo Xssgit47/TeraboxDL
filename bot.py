@@ -3,6 +3,7 @@ import logging
 import time
 import requests
 import tempfile
+import asyncio
 from collections import defaultdict
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
@@ -128,7 +129,6 @@ def download_and_upload(context, chat_id, admin_group_id, file_info, user, file_
     dlink = file_info.get("dlink", "")
     isdir = file_info.get("isdir", False)
     extension = os.path.splitext(dlink)[-1].lower()
-
     caption = f"📁 {name}\nSize: {size}\n{BRAND}"
 
     if isdir or not dlink:
@@ -142,21 +142,20 @@ def download_and_upload(context, chat_id, admin_group_id, file_info, user, file_
         return
 
     try:
-        # Try to download file and send as media (Telegram allows ≤2GB for videos, ≤20MB for images)
+        # Download file and send as media (Telegram allows ≤2GB for videos, ≤20MB for images)
         with tempfile.NamedTemporaryFile(delete=True) as temp_file:
             r = requests.get(dlink, stream=True, timeout=60)
             r.raise_for_status()
-            for chunk in r.iter_content(chunk_size=1048576): # 1MB at a time
+            for chunk in r.iter_content(chunk_size=1048576):
                 temp_file.write(chunk)
             temp_file.flush()
-
-            # Try video first
+            # Video (max 2GB)
             if extension in ('.mp4', '.mkv', '.mov', '.webm', '.avi'):
                 context.bot.send_video(chat_id=chat_id, video=open(temp_file.name, 'rb'), caption=caption)
                 if admin_group_id:
                     context.bot.send_video(chat_id=admin_group_id, video=open(temp_file.name, 'rb'),
                         caption=f"🔎 ADMIN REVIEW\n{caption}\nRequested by: {user.full_name}\nURL: {file_url}")
-            # Try photo
+            # Image (max 20MB)
             elif extension in ('.jpg', '.jpeg', '.png', '.gif'):
                 context.bot.send_photo(chat_id=chat_id, photo=open(temp_file.name, 'rb'), caption=caption)
                 if admin_group_id:
@@ -166,18 +165,14 @@ def download_and_upload(context, chat_id, admin_group_id, file_info, user, file_
                 msg_text = f"{name}\nSize: {size}\n{BRAND}\n{dlink}"
                 context.bot.send_message(chat_id, msg_text, disable_web_page_preview=True)
                 if admin_group_id:
-                    admin_msg = (
-                        f"🔎 ADMIN REVIEW\nUser: {user.full_name}\nURL: {file_url}\n\n{msg_text}"
-                    )
+                    admin_msg = f"🔎 ADMIN REVIEW\nUser: {user.full_name}\nURL: {file_url}\n\n{msg_text}"
                     context.bot.send_message(admin_group_id, admin_msg)
     except Exception as e:
-        # Fallback: send link
+        # Fallback: send download link
         msg_text = f"{name}\nSize: {size}\n{BRAND}\n{dlink}\n(File transfer failed: {e})"
         context.bot.send_message(chat_id, msg_text, disable_web_page_preview=True)
         if admin_group_id:
-            admin_msg = (
-                f"🔎 ADMIN REVIEW\nUser: {user.full_name}\nURL: {file_url}\n\n{msg_text}"
-            )
+            admin_msg = f"🔎 ADMIN REVIEW\nUser: {user.full_name}\nURL: {file_url}\n\n{msg_text}"
             context.bot.send_message(admin_group_id, admin_msg)
 
 async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -195,7 +190,6 @@ async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     file_url = context.args[0].strip()
     reply = fetch_terabox(file_url)
-
     import json
     try:
         data = json.loads(reply)
@@ -205,15 +199,13 @@ async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_id = update.effective_chat.id
 
-    # Use run_in_executor to avoid blocking async event loop with the file download/upload
     if data and data.get("success") and data.get("files"):
-        import concurrent.futures
+        loop = asyncio.get_running_loop()
         for file_info in data["files"]:
-            loop = context.application.loop
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                await loop.run_in_executor(pool, download_and_upload, context, chat_id, ADMIN_GROUP_ID, file_info, user, file_url)
+            await loop.run_in_executor(
+                None, download_and_upload, context, chat_id, ADMIN_GROUP_ID, file_info, user, file_url
+            )
     else:
-        # fallback message
         await update.effective_message.reply_text(f"{reply}\n{BRAND}")
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
