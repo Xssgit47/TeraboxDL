@@ -58,9 +58,9 @@ This bot helps you fetch direct links from Terabox URLs with a clean and stylish
 
 ✨ *Features:*
 - **Direct Link Processing**: Instantly get media or download links.
-- **Admin Review**: Files are forwarded for review.
+- **Admin Support**: Files are forwarded Fastly.
 - **Anti-Spam**: Protects against request flooding.
-- **Force Join**: Ensures users join your channel.
+- **Please Join**: Ensures users join our channel.
 
 To get started, simply send a Terabox URL.
 
