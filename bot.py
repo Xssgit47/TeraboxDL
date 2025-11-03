@@ -3,7 +3,8 @@ import logging
 import time
 from collections import defaultdict
 import requests
-
+import json
+import uuid  # Added for unique file IDs
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
@@ -34,12 +35,17 @@ for part in _admin_ids_raw.split(","):
     except ValueError:
         pass
 
+VPS_IP = os.getenv("VPS_IP", "46.202.163.22")  # Updated: Correct VPS IP for streaming URLs
+VPS_PORT = os.getenv("VPS_PORT", "8083")       # Updated: Port 8083 as selected
+DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "/tmp/bot_dl")  # Local dir to store videos; adjust for botuser if created
+
 BRAND = "Powered by @FNxDANGER"
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
 )
+
 log = logging.getLogger("terabox-bot")
 
 USER_LAST_TIME = defaultdict(float)
@@ -47,6 +53,7 @@ ANTI_SPAM_INTERVAL = 15
 
 WELCOME_MSG = f"""
 👋 Welcome!
+
 This bot fetches Terabox links with a clean, stylish flow.
 
 ✨ Features:
@@ -54,22 +61,22 @@ This bot fetches Terabox links with a clean, stylish flow.
 - Admin review forwarding (separate from force-join)
 - Anti-spam protection
 - Force-join channel check
-
 {BRAND}
+
 """
 
 HELP_MSG = f"""**User Commands:**
 /start - Welcome & Info
 /help - List commands
-/terabox <URL> - Fetch direct media or download links from Terabox
+/terabox - Fetch direct media or download links from Terabox
 
 **Admin Commands:**
 /stats - Bot stats
-/ban <user_id> - Ban user (stub)
-/unban <user_id> - Unban user (stub)
-/broadcast <msg> - Broadcast to users
-
+/ban - Ban user (stub)
+/unban - Unban user (stub)
+/broadcast - Broadcast to users
 {BRAND}
+
 """
 
 def spam_check(update: Update) -> bool:
@@ -149,13 +156,71 @@ async def send_file_to_user_and_group(context, chat_id, admin_group_id, file_inf
     try:
         # Try to send direct media
         if dlink.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.webm')):
-            await context.bot.send_video(chat_id=chat_id, video=dlink, caption=caption, parse_mode="MarkdownV2", supports_streaming=True)
-            if admin_group_id:
-                await context.bot.send_video(chat_id=admin_group_id, video=dlink, caption=f"🔎 *ADMIN REVIEW*\n{caption}\nRequested by: [{escape_markdown(user.full_name,2)}](tg://user?id={user.id})\nURL: `{escape_markdown(file_url,2)}`", parse_mode="MarkdownV2", supports_streaming=True)
+            # Download to VPS for streaming
+            unique_id = str(uuid.uuid4())
+            ext = os.path.splitext(name)[1] or '.mp4'
+            local_filename = f"{unique_id}{ext}"
+            local_path = os.path.join(DOWNLOAD_DIR, local_filename)
+            os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+            vps_stream_url = f"http://{VPS_IP}:{VPS_PORT}/dl/{local_filename}"  # VPS streaming URL
+
+            download_success = False
+            try:
+                response = requests.get(dlink, stream=True, timeout=30)
+                response.raise_for_status()
+                with open(local_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                download_success = True
+            except Exception as download_e:
+                log.warning(f"Download failed for {name}: {download_e}")
+                # Fallback: remove partial file if exists
+                if os.path.exists(local_path):
+                    os.remove(local_path)
+
+            if download_success:
+                # Send from VPS URL
+                await context.bot.send_video(
+                    chat_id=chat_id, 
+                    video=vps_stream_url, 
+                    caption=caption, 
+                    parse_mode="MarkdownV2", 
+                    supports_streaming=True
+                )
+                if admin_group_id:
+                    admin_caption = f"🔎 *ADMIN REVIEW*\n{caption}\nRequested by: [{escape_markdown(user.full_name,2)}](tg://user?id={user.id})\nURL: `{escape_markdown(file_url,2)}`"
+                    await context.bot.send_video(
+                        chat_id=admin_group_id, 
+                        video=vps_stream_url, 
+                        caption=admin_caption, 
+                        parse_mode="MarkdownV2", 
+                        supports_streaming=True
+                    )
+            else:
+                # Fallback to original dlink
+                await context.bot.send_video(
+                    chat_id=chat_id, 
+                    video=dlink, 
+                    caption=caption, 
+                    parse_mode="MarkdownV2", 
+                    supports_streaming=True
+                )
+                if admin_group_id:
+                    admin_caption = f"🔎 *ADMIN REVIEW*\n{caption}\nRequested by: [{escape_markdown(user.full_name,2)}](tg://user?id={user.id})\nURL: `{escape_markdown(file_url,2)}`"
+                    await context.bot.send_video(
+                        chat_id=admin_group_id, 
+                        video=dlink, 
+                        caption=admin_caption, 
+                        parse_mode="MarkdownV2", 
+                        supports_streaming=True
+                    )
+
         elif dlink.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
             await context.bot.send_photo(chat_id=chat_id, photo=dlink, caption=caption, parse_mode="MarkdownV2")
             if admin_group_id:
-                await context.bot.send_photo(chat_id=admin_group_id, photo=dlink, caption=f"🔎 *ADMIN REVIEW*\n{caption}\nRequested by: [{escape_markdown(user.full_name,2)}](tg://user?id={user.id})\nURL: `{escape_markdown(file_url,2)}`", parse_mode="MarkdownV2")
+                admin_caption = f"🔎 *ADMIN REVIEW*\n{caption}\nRequested by: [{escape_markdown(user.full_name,2)}](tg://user?id={user.id})\nURL: `{escape_markdown(file_url,2)}`"
+                await context.bot.send_photo(chat_id=admin_group_id, photo=dlink, caption=admin_caption, parse_mode="MarkdownV2")
         else:
             # Otherwise send download link
             msg_text = f"[{escape_markdown(name, 2)}]({escape_markdown(dlink, 2)})\nSize: {escape_markdown(size, 2)}\n{BRAND}"
@@ -168,6 +233,7 @@ async def send_file_to_user_and_group(context, chat_id, admin_group_id, file_inf
                     f"{msg_text}"
                 )
                 await context.bot.send_message(admin_group_id, admin_msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
+
     except Exception as e:
         # Fallback if any error occurs
         fallback = f"[{escape_markdown(name, 2)}]({escape_markdown(dlink, 2)})\nSize: {escape_markdown(size, 2)}\n{BRAND}"
@@ -180,6 +246,7 @@ async def send_file_to_user_and_group(context, chat_id, admin_group_id, file_inf
                 f"{fallback}"
             )
             await context.bot.send_message(admin_group_id, admin_msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
+        log.error(f"Send error for {name}: {e}")
 
 async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_joined(update, context):
@@ -197,7 +264,6 @@ async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_url = context.args[0].strip()
     reply = fetch_terabox(file_url)
 
-    import json
     try:
         data = json.loads(reply)
     except Exception:
@@ -213,8 +279,7 @@ async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         safe_reply = escape_markdown(reply, version=2)
         await update.effective_message.reply_text(f"{safe_reply}\n{BRAND}", parse_mode="MarkdownV2")
-
-    return
+        return
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -263,9 +328,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 def main():
     if not TELEGRAM_TOKEN:
         raise RuntimeError("TELEGRAM_TOKEN is not set. Check your .env.")
-
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("terabox", terabox_cmd))
@@ -273,7 +336,6 @@ def main():
     app.add_handler(CommandHandler("ban", ban))
     app.add_handler(CommandHandler("unban", unban))
     app.add_handler(CommandHandler("broadcast", broadcast))
-
     app.add_error_handler(error_handler)
     app.run_polling(close_loop=False)
 
