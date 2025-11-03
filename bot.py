@@ -125,8 +125,7 @@ def is_likely_video(file_info: dict) -> bool:
     """Detect video based on category, name extension, or size (>100MB)."""
     name = file_info.get("name", "")
     size_str = file_info.get("size", "0")
-    category = file_info.get("category", 0)  # From API: 1=video
-    # Parse size to bytes (rough: assume MB if 'MB' in str)
+    category = file_info.get("category", 0)
     size_bytes = 0
     if 'MB' in size_str:
         size_bytes = float(size_str.split()[0]) * 1024 * 1024
@@ -136,7 +135,7 @@ def is_likely_video(file_info: dict) -> bool:
     name_lower = name.lower()
     return (category == 1 or
             any(name_lower.endswith(ext) for ext in video_extensions) or
-            size_bytes > 100 * 1024 * 1024)  # >100MB
+            size_bytes > 100 * 1024 * 1024)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(WELCOME_MSG, parse_mode="Markdown")
@@ -149,63 +148,68 @@ async def send_file_to_user_and_group(context, chat_id, admin_group_id, file_inf
     size = file_info.get("size", "")
     dlink = file_info.get("dlink", "")
     isdir = file_info.get("isdir", False)
-    dlink_escaped = escape_markdown(dlink, 2) if dlink else ""
-    name_escaped = escape_markdown(name, 2)
-    size_escaped = escape_markdown(size, 2)
-
+    
+    # Escape all parts individually
+    name_escaped = escape_markdown(name, version=2)
+    size_escaped = escape_markdown(size, version=2)
+    dlink_escaped = escape_markdown(dlink, version=2) if dlink else ""
+    file_url_escaped = escape_markdown(file_url, version=2)
+    user_name_escaped = escape_markdown(user.full_name, version=2)
+    
     if isdir or not dlink:
-        msg_text = f"Folder: [{name_escaped}]({dlink_escaped})\nSize: {size_escaped}\n{BRAND}"
+        msg_text = f"Folder: \\[{name_escaped}\\]\\({dlink_escaped}\\)\nSize: {size_escaped}\n{BRAND}"
         await context.bot.send_message(chat_id, msg_text, parse_mode="MarkdownV2", disable_web_page_preview=False)
         if admin_group_id:
-            admin_msg = (
-                f"🔎 *New Folder Request:*\n"
-                f"User: [{escape_markdown(user.full_name, 2)}](tg://user?id={user.id})\n"
-                f"URL: `{escape_markdown(file_url, 2)}`\n\n"
-                f"{msg_text}"
-            )
-            await context.bot.send_message(admin_group_id, admin_msg, parse_mode="MarkdownV2")
+            admin_msg = f"🔎 \\*New Folder Request: \\*\nUser: \\[{user_name_escaped}\\]\\(tg://user\\?id={user.id}\\)\nURL: `{file_url_escaped}`\n\n{msg_text}"
+            try:
+                await context.bot.send_message(admin_group_id, admin_msg, parse_mode="MarkdownV2")
+            except BadRequest:
+                # Fallback plain text
+                await context.bot.send_message(admin_group_id, f"New Folder Request:\nUser: {user.full_name} (id:{user.id})\nURL: {file_url}\n\n{msg_text.replace('\\\\', '').replace('\\[', '[').replace('\\]', ']').replace('\\(', '(').replace('\\)', ')')}")
         return
 
     try:
-        # Check if likely video
         if is_likely_video(file_info):
-            # Download to VPS for streaming
             unique_id = str(uuid.uuid4())
             ext = os.path.splitext(name)[1] or '.mp4'
             local_filename = f"{unique_id}{ext}"
             local_path = os.path.join(DOWNLOAD_DIR, local_filename)
             os.makedirs(DOWNLOAD_DIR, exist_ok=True)
             vps_stream_url = f"http://{VPS_IP}:{VPS_PORT}/dl/{local_filename}"
-            vps_url_escaped = escape_markdown(vps_stream_url, 2)
+            vps_url_escaped = escape_markdown(vps_stream_url, version=2)
 
             log.info(f"Attempting download for video: {name} to {local_path}")
             download_success = False
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Referer': 'https://www.terabox.com/'
+            }
             try:
-                response = requests.get(dlink, stream=True, timeout=60)
+                response = requests.get(dlink, stream=True, timeout=120, headers=headers)  # Increased timeout + headers
                 response.raise_for_status()
                 with open(local_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
                 download_success = os.path.exists(local_path) and os.path.getsize(local_path) > 0
-                log.info(f"Download success: {download_success} for {name}")
+                log.info(f"Download success: {download_success} for {name} (size: {os.path.getsize(local_path) if download_success else 0})")
             except Exception as download_e:
                 log.warning(f"Download failed for {name}: {download_e}")
                 if os.path.exists(local_path):
                     os.remove(local_path)
 
-            # Dual links caption
-            base_caption = f"📁 *{name_escaped}*\nSize: {size_escaped}"
+            # Safe caption construction with escaped links
+            base_caption = f"📁 \\*{name_escaped}\\*\nSize: {size_escaped}"
             if download_success:
-                dual_links = f"\n📥 Download: [{dlink_escaped}]({dlink_escaped})\n▶️ Stream: [{vps_url_escaped}]({vps_url_escaped})"
+                dual_links = f"\n📥 Download: \\[{dlink_escaped}\\]\\({dlink_escaped}\\)\n▶️ Stream: \\[{vps_url_escaped}\\]\\({vps_url_escaped}\\)"
                 caption = f"{base_caption}{dual_links}\n{BRAND}"
                 video_url = vps_stream_url
             else:
-                dual_links = f"\n📥 Download: [{dlink_escaped}]({dlink_escaped})\n▶️ Stream (fallback): [{vps_url_escaped}]({dlink_escaped})"
+                dual_links = f"\n📥 Download: \\[{dlink_escaped}\\]\\({dlink_escaped}\\)\n▶️ Stream (fallback): \\[{vps_url_escaped}\\]\\({dlink_escaped}\\)"
                 caption = f"{base_caption}{dual_links}\n{BRAND}"
                 video_url = dlink
 
-            # Send video with dual links
+            # Send video
             await context.bot.send_video(
                 chat_id=chat_id, 
                 video=video_url, 
@@ -213,50 +217,54 @@ async def send_file_to_user_and_group(context, chat_id, admin_group_id, file_inf
                 parse_mode="MarkdownV2", 
                 supports_streaming=True
             )
+            # Admin send with try-except
             if admin_group_id:
-                admin_caption = f"🔎 *ADMIN REVIEW*\n{caption}\nRequested by: [{escape_markdown(user.full_name,2)}](tg://user?id={user.id})\nURL: `{escape_markdown(file_url,2)}`"
-                await context.bot.send_video(
-                    chat_id=admin_group_id, 
-                    video=video_url, 
-                    caption=admin_caption, 
-                    parse_mode="MarkdownV2", 
-                    supports_streaming=True
-                )
+                admin_caption = f"🔎 \\*ADMIN REVIEW\\*\n{caption}\nRequested by: \\[{user_name_escaped}\\]\\(tg://user\\?id={user.id}\\)\nURL: `{file_url_escaped}`"
+                try:
+                    await context.bot.send_video(
+                        chat_id=admin_group_id, 
+                        video=video_url, 
+                        caption=admin_caption, 
+                        parse_mode="MarkdownV2", 
+                        supports_streaming=True
+                    )
+                except BadRequest as e:
+                    log.warning(f"Admin video send failed: {e}")
+                    # Fallback plain admin message
+                    plain_admin = f"ADMIN REVIEW\n{caption.replace('\\\\', '').replace('\\[', '[').replace('\\]', ']').replace('\\(', '(').replace('\\)', ')').replace('\\*', '*')}\nRequested by: {user.full_name} (tg://user?id={user.id})\nURL: {file_url}"
+                    await context.bot.send_message(admin_group_id, plain_admin)
             return
 
-        # For non-videos (unchanged)
+        # Non-videos (images/docs) - unchanged but with safe escaping
         if dlink.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
-            caption = f"📁 *{name_escaped}*\nSize: {size_escaped}\n{BRAND}"
+            caption = f"📁 \\*{name_escaped}\\*\nSize: {size_escaped}\n{BRAND}"
             await context.bot.send_photo(chat_id=chat_id, photo=dlink, caption=caption, parse_mode="MarkdownV2")
             if admin_group_id:
-                admin_caption = f"🔎 *ADMIN REVIEW*\n{caption}\nRequested by: [{escape_markdown(user.full_name,2)}](tg://user?id={user.id})\nURL: `{escape_markdown(file_url,2)}`"
-                await context.bot.send_photo(chat_id=admin_group_id, photo=dlink, caption=admin_caption, parse_mode="MarkdownV2")
+                admin_caption = f"🔎 \\*ADMIN REVIEW\\*\n{caption}\nRequested by: \\[{user_name_escaped}\\]\\(tg://user\\?id={user.id}\\)\nURL: `{file_url_escaped}`"
+                try:
+                    await context.bot.send_photo(admin_group_id, photo=dlink, caption=admin_caption, parse_mode="MarkdownV2")
+                except BadRequest:
+                    await context.bot.send_message(admin_group_id, f"ADMIN REVIEW\n{caption.replace('\\\\', '').replace('\\*', '*')}\nRequested by: {user.full_name}\nURL: {file_url}")
         else:
-            # Download link (unchanged)
-            msg_text = f"[{name_escaped}]({dlink_escaped})\nSize: {size_escaped}\n{BRAND}"
+            msg_text = f"\\[{name_escaped}\\]\\({dlink_escaped}\\)\nSize: {size_escaped}\n{BRAND}"
             await context.bot.send_message(chat_id, msg_text, parse_mode="MarkdownV2", disable_web_page_preview=True)
             if admin_group_id:
-                admin_msg = (
-                    f"🔎 *New File Request:*\n"
-                    f"User: [{escape_markdown(user.full_name, 2)}](tg://user?id={user.id})\n"
-                    f"URL: `{escape_markdown(file_url, 2)}`\n\n"
-                    f"{msg_text}"
-                )
-                await context.bot.send_message(admin_group_id, admin_msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
+                admin_msg = f"🔎 \\*New File Request: \\*\nUser: \\[{user_name_escaped}\\]\\(tg://user\\?id={user.id}\\)\nURL: `{file_url_escaped}`\n\n{msg_text}"
+                try:
+                    await context.bot.send_message(admin_group_id, admin_msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
+                except BadRequest:
+                    await context.bot.send_message(admin_group_id, f"New File Request:\nUser: {user.full_name}\nURL: {file_url}\n\n{name}: {dlink}\nSize: {size}\n{BRAND}")
 
     except Exception as e:
         log.error(f"Send error for {name}: {e}")
-        fallback = f"[{name_escaped}]({dlink_escaped})\nSize: {size_escaped}\n{BRAND}"
-        await context.bot.send_message(chat_id, fallback, parse_mode="MarkdownV2", disable_web_page_preview=True)
+        # Safe fallback: Plain text with raw links
+        fallback = f"{name}\nSize: {size}\nDownload: {dlink}\n{BRAND}"
+        await context.bot.send_message(chat_id, fallback, disable_web_page_preview=True)
         if admin_group_id:
-            admin_msg = (
-                f"🔎 *New File Request (fallback):*\n"
-                f"User: [{escape_markdown(user.full_name, 2)}](tg://user?id={user.id})\n"
-                f"URL: `{escape_markdown(file_url, 2)}`\n\n"
-                f"{fallback}"
-            )
-            await context.bot.send_message(admin_group_id, admin_msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
+            admin_fallback = f"New File Request (fallback):\nUser: {user.full_name}\nURL: {file_url}\n\n{fallback}"
+            await context.bot.send_message(admin_group_id, admin_fallback)
 
+# ... (rest of the code remains the same as previous version: terabox_cmd, stats, ban, unban, broadcast, error_handler, main)
 async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_joined(update, context):
         await prompt_force_join(update)
