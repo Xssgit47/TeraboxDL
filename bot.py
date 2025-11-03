@@ -4,18 +4,17 @@ import time
 from collections import defaultdict
 import requests
 
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo, InputMediaPhoto
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes
 )
-from telegram.helpers import escape_markdown  # Correctly imported at top level now
+from telegram.helpers import escape_markdown
 from dotenv import load_dotenv
 
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-
 FORCE_JOIN_CHANNEL = os.getenv("FORCE_JOIN_CHANNEL_ID")
 
 _admin_group_raw = os.getenv("ADMIN_GROUP_ID", "").strip()
@@ -51,7 +50,7 @@ WELCOME_MSG = f"""
 This bot fetches Terabox links with a clean, stylish flow.
 
 ✨ Features:
-- Direct Terabox link processing, including direct media sending
+- Direct Terabox link processing with direct media sending
 - Admin review forwarding (separate from force-join)
 - Anti-spam protection
 - Force-join channel check
@@ -62,7 +61,7 @@ This bot fetches Terabox links with a clean, stylish flow.
 HELP_MSG = f"""**User Commands:**
 /start - Welcome & Info
 /help - List commands
-/terabox <URL> - Fetch direct media or links from Terabox
+/terabox <URL> - Fetch direct media or download links from Terabox
 
 **Admin Commands:**
 /stats - Bot stats
@@ -84,17 +83,14 @@ def spam_check(update: Update) -> bool:
 async def is_joined(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not FORCE_JOIN_CHANNEL:
         return True
-
     user_id = update.effective_user.id
     try:
         member = await context.bot.get_chat_member(FORCE_JOIN_CHANNEL, user_id)
         status = getattr(member, "status", "")
         return status in ["member", "administrator", "creator"]
-    except (BadRequest, Forbidden) as e:
-        log.warning("get_chat_member failed: %s", e)
+    except (BadRequest, Forbidden):
         return False
-    except TelegramError as e:
-        log.error("TelegramError in get_chat_member: %s", e)
+    except TelegramError:
         return True
 
 async def prompt_force_join(update: Update):
@@ -126,6 +122,65 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(HELP_MSG, parse_mode="Markdown")
 
+async def send_file_to_user_and_group(context, chat_id, admin_group_id, file_info, user, file_url):
+    """
+    Send direct media or download link in both user chat and admin review group.
+    """
+    name = file_info.get("name", "File")
+    size = file_info.get("size", "")
+    dlink = file_info.get("dlink", "")
+    isdir = file_info.get("isdir", False)
+    caption = f"📁 *{escape_markdown(name, 2)}*\nSize: {escape_markdown(size, 2)}\n{BRAND}"
+
+    # If folder, just send a clickable link
+    if isdir or not dlink:
+        msg_text = f"Folder: [{escape_markdown(name, 2)}]({escape_markdown(dlink, 2)})\nSize: {escape_markdown(size, 2)}\n{BRAND}"
+        await context.bot.send_message(chat_id, msg_text, parse_mode="MarkdownV2", disable_web_page_preview=False)
+        if admin_group_id:
+            admin_msg = (
+                f"🔎 *New Folder Request:*\n"
+                f"User: [{escape_markdown(user.full_name, 2)}](tg://user?id={user.id})\n"
+                f"URL: `{escape_markdown(file_url, 2)}`\n\n"
+                f"{msg_text}"
+            )
+            await context.bot.send_message(admin_group_id, admin_msg, parse_mode="MarkdownV2")
+        return
+
+    try:
+        # Try to send direct media
+        if dlink.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.webm')):
+            await context.bot.send_video(chat_id=chat_id, video=dlink, caption=caption, parse_mode="MarkdownV2", supports_streaming=True)
+            if admin_group_id:
+                await context.bot.send_video(chat_id=admin_group_id, video=dlink, caption=f"🔎 *ADMIN REVIEW*\n{caption}\nRequested by: [{escape_markdown(user.full_name,2)}](tg://user?id={user.id})\nURL: `{escape_markdown(file_url,2)}`", parse_mode="MarkdownV2", supports_streaming=True)
+        elif dlink.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
+            await context.bot.send_photo(chat_id=chat_id, photo=dlink, caption=caption, parse_mode="MarkdownV2")
+            if admin_group_id:
+                await context.bot.send_photo(chat_id=admin_group_id, photo=dlink, caption=f"🔎 *ADMIN REVIEW*\n{caption}\nRequested by: [{escape_markdown(user.full_name,2)}](tg://user?id={user.id})\nURL: `{escape_markdown(file_url,2)}`", parse_mode="MarkdownV2")
+        else:
+            # Otherwise send download link
+            msg_text = f"[{escape_markdown(name, 2)}]({escape_markdown(dlink, 2)})\nSize: {escape_markdown(size, 2)}\n{BRAND}"
+            await context.bot.send_message(chat_id, msg_text, parse_mode="MarkdownV2", disable_web_page_preview=True)
+            if admin_group_id:
+                admin_msg = (
+                    f"🔎 *New File Request:*\n"
+                    f"User: [{escape_markdown(user.full_name, 2)}](tg://user?id={user.id})\n"
+                    f"URL: `{escape_markdown(file_url, 2)}`\n\n"
+                    f"{msg_text}"
+                )
+                await context.bot.send_message(admin_group_id, admin_msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
+    except Exception as e:
+        # Fallback if any error occurs
+        fallback = f"[{escape_markdown(name, 2)}]({escape_markdown(dlink, 2)})\nSize: {escape_markdown(size, 2)}\n{BRAND}"
+        await context.bot.send_message(chat_id, fallback, parse_mode="MarkdownV2", disable_web_page_preview=True)
+        if admin_group_id:
+            admin_msg = (
+                f"🔎 *New File Request (fallback):*\n"
+                f"User: [{escape_markdown(user.full_name, 2)}](tg://user?id={user.id})\n"
+                f"URL: `{escape_markdown(file_url, 2)}`\n\n"
+                f"{fallback}"
+            )
+            await context.bot.send_message(admin_group_id, admin_msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
+
 async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_joined(update, context):
         await prompt_force_join(update)
@@ -149,58 +204,12 @@ async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = None
 
     user = update.effective_user
+    chat_id = update.effective_chat.id
 
     if data and data.get("success") and data.get("files"):
         for file_info in data["files"]:
-            name = file_info.get("name", "File")
-            size = file_info.get("size", "")
-            dlink = file_info.get("dlink", "")
-            thumbnail = file_info.get("thumbnail", "")
-            isdir = file_info.get("isdir", False)
-
-            caption = f"📁 *{escape_markdown(name,2)}*\nSize: {escape_markdown(size,2)}\n{BRAND}"
-
-            if isdir:
-                msg_text = f"Folder: [{escape_markdown(name,2)}]({escape_markdown(dlink,2)})\nSize: {escape_markdown(size,2)}\n{BRAND}"
-                await update.effective_message.reply_text(msg_text, parse_mode="MarkdownV2", disable_web_page_preview=False)
-                if ADMIN_GROUP_ID:
-                    admin_msg = (
-                        f"🔎 *New File Request:*\n"
-                        f"User: [{escape_markdown(user.full_name, 2)}](tg://user?id={user.id})\n"
-                        f"URL: `{escape_markdown(file_url, 2)}`\n\n"
-                        f"{msg_text}"
-                    )
-                    await context.bot.send_message(ADMIN_GROUP_ID, admin_msg, parse_mode="MarkdownV2")
-            else:
-                try:
-                    if dlink.endswith((".mp4", ".mkv", ".avi", ".mov", ".webm")):
-                        await update.effective_message.reply_video(video=dlink, caption=caption, parse_mode="MarkdownV2", supports_streaming=True)
-                    elif dlink.endswith((".jpg", ".jpeg", ".png", ".gif")):
-                        await update.effective_message.reply_photo(photo=dlink, caption=caption, parse_mode="MarkdownV2")
-                    else:
-                        msg_text = f"[{escape_markdown(name,2)}]({escape_markdown(dlink,2)})\nSize: {escape_markdown(size,2)}\n{BRAND}"
-                        await update.effective_message.reply_text(msg_text, parse_mode="MarkdownV2", disable_web_page_preview=True)
-
-                    if ADMIN_GROUP_ID:
-                        admin_msg = (
-                            f"🔎 *New File Request:*\n"
-                            f"User: [{escape_markdown(user.full_name, 2)}](tg://user?id={user.id})\n"
-                            f"URL: `{escape_markdown(file_url, 2)}`\n\n"
-                            f"{caption}\n{dlink}"
-                        )
-                        await context.bot.send_message(ADMIN_GROUP_ID, admin_msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
-                except Exception as e:
-                    msg_text = f"[{escape_markdown(name,2)}]({escape_markdown(dlink,2)})\nSize: {escape_markdown(size,2)}\n{BRAND}"
-                    await update.effective_message.reply_text(msg_text, parse_mode="MarkdownV2", disable_web_page_preview=True)
-                    if ADMIN_GROUP_ID:
-                        admin_msg = (
-                            f"🔎 *New File Request (fallback):*\n"
-                            f"User: [{escape_markdown(user.full_name, 2)}](tg://user?id={user.id})\n"
-                            f"URL: `{escape_markdown(file_url, 2)}`\n\n"
-                            f"{msg_text}"
-                        )
-                        await context.bot.send_message(ADMIN_GROUP_ID, admin_msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
-
+            # Send direct media or link to BOTH user and admin group (if set)
+            await send_file_to_user_and_group(context, chat_id, ADMIN_GROUP_ID, file_info, user, file_url)
     else:
         safe_reply = escape_markdown(reply, version=2)
         await update.effective_message.reply_text(f"{safe_reply}\n{BRAND}", parse_mode="MarkdownV2")
