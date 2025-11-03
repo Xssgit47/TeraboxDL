@@ -4,7 +4,7 @@ import time
 from collections import defaultdict
 import requests
 import json
-import uuid  # Added for unique file IDs
+import uuid
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
@@ -35,9 +35,9 @@ for part in _admin_ids_raw.split(","):
     except ValueError:
         pass
 
-VPS_IP = os.getenv("VPS_IP", "46.202.163.22")  # Updated: Correct VPS IP for streaming URLs
-VPS_PORT = os.getenv("VPS_PORT", "8083")       # Updated: Port 8083 as selected
-DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "/tmp/bot_dl")  # Local dir to store videos; adjust for botuser if created
+VPS_IP = os.getenv("VPS_IP", "46.202.163.22")
+VPS_PORT = os.getenv("VPS_PORT", "8083")
+DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "/tmp/bot_dl")
 
 BRAND = "Powered by @FNxDANGER"
 
@@ -62,7 +62,6 @@ This bot fetches Terabox links with a clean, stylish flow.
 - Anti-spam protection
 - Force-join channel check
 {BRAND}
-
 """
 
 HELP_MSG = f"""**User Commands:**
@@ -76,7 +75,6 @@ HELP_MSG = f"""**User Commands:**
 /unban - Unban user (stub)
 /broadcast - Broadcast to users
 {BRAND}
-
 """
 
 def spam_check(update: Update) -> bool:
@@ -123,6 +121,23 @@ def fetch_terabox(url: str) -> str:
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
+def is_likely_video(file_info: dict) -> bool:
+    """Detect video based on category, name extension, or size (>100MB)."""
+    name = file_info.get("name", "")
+    size_str = file_info.get("size", "0")
+    category = file_info.get("category", 0)  # From API: 1=video
+    # Parse size to bytes (rough: assume MB if 'MB' in str)
+    size_bytes = 0
+    if 'MB' in size_str:
+        size_bytes = float(size_str.split()[0]) * 1024 * 1024
+    elif 'GB' in size_str:
+        size_bytes = float(size_str.split()[0]) * 1024 * 1024 * 1024
+    video_extensions = ('.mp4', '.mkv', '.avi', '.mov', '.webm', '.m4v')
+    name_lower = name.lower()
+    return (category == 1 or
+            any(name_lower.endswith(ext) for ext in video_extensions) or
+            size_bytes > 100 * 1024 * 1024)  # >100MB
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(WELCOME_MSG, parse_mode="Markdown")
 
@@ -130,18 +145,16 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(HELP_MSG, parse_mode="Markdown")
 
 async def send_file_to_user_and_group(context, chat_id, admin_group_id, file_info, user, file_url):
-    """
-    Send direct media or download link in both user chat and admin review group.
-    """
     name = file_info.get("name", "File")
     size = file_info.get("size", "")
     dlink = file_info.get("dlink", "")
     isdir = file_info.get("isdir", False)
-    caption = f"📁 *{escape_markdown(name, 2)}*\nSize: {escape_markdown(size, 2)}\n{BRAND}"
+    dlink_escaped = escape_markdown(dlink, 2) if dlink else ""
+    name_escaped = escape_markdown(name, 2)
+    size_escaped = escape_markdown(size, 2)
 
-    # If folder, just send a clickable link
     if isdir or not dlink:
-        msg_text = f"Folder: [{escape_markdown(name, 2)}]({escape_markdown(dlink, 2)})\nSize: {escape_markdown(size, 2)}\n{BRAND}"
+        msg_text = f"Folder: [{name_escaped}]({dlink_escaped})\nSize: {size_escaped}\n{BRAND}"
         await context.bot.send_message(chat_id, msg_text, parse_mode="MarkdownV2", disable_web_page_preview=False)
         if admin_group_id:
             admin_msg = (
@@ -154,76 +167,73 @@ async def send_file_to_user_and_group(context, chat_id, admin_group_id, file_inf
         return
 
     try:
-        # Try to send direct media
-        if dlink.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.webm')):
+        # Check if likely video
+        if is_likely_video(file_info):
             # Download to VPS for streaming
             unique_id = str(uuid.uuid4())
             ext = os.path.splitext(name)[1] or '.mp4'
             local_filename = f"{unique_id}{ext}"
             local_path = os.path.join(DOWNLOAD_DIR, local_filename)
             os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-            vps_stream_url = f"http://{VPS_IP}:{VPS_PORT}/dl/{local_filename}"  # VPS streaming URL
+            vps_stream_url = f"http://{VPS_IP}:{VPS_PORT}/dl/{local_filename}"
+            vps_url_escaped = escape_markdown(vps_stream_url, 2)
 
+            log.info(f"Attempting download for video: {name} to {local_path}")
             download_success = False
             try:
-                response = requests.get(dlink, stream=True, timeout=30)
+                response = requests.get(dlink, stream=True, timeout=60)
                 response.raise_for_status()
                 with open(local_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
-                download_success = True
+                download_success = os.path.exists(local_path) and os.path.getsize(local_path) > 0
+                log.info(f"Download success: {download_success} for {name}")
             except Exception as download_e:
                 log.warning(f"Download failed for {name}: {download_e}")
-                # Fallback: remove partial file if exists
                 if os.path.exists(local_path):
                     os.remove(local_path)
 
+            # Dual links caption
+            base_caption = f"📁 *{name_escaped}*\nSize: {size_escaped}"
             if download_success:
-                # Send from VPS URL
-                await context.bot.send_video(
-                    chat_id=chat_id, 
-                    video=vps_stream_url, 
-                    caption=caption, 
-                    parse_mode="MarkdownV2", 
-                    supports_streaming=True
-                )
-                if admin_group_id:
-                    admin_caption = f"🔎 *ADMIN REVIEW*\n{caption}\nRequested by: [{escape_markdown(user.full_name,2)}](tg://user?id={user.id})\nURL: `{escape_markdown(file_url,2)}`"
-                    await context.bot.send_video(
-                        chat_id=admin_group_id, 
-                        video=vps_stream_url, 
-                        caption=admin_caption, 
-                        parse_mode="MarkdownV2", 
-                        supports_streaming=True
-                    )
+                dual_links = f"\n📥 Download: [{dlink_escaped}]({dlink_escaped})\n▶️ Stream: [{vps_url_escaped}]({vps_url_escaped})"
+                caption = f"{base_caption}{dual_links}\n{BRAND}"
+                video_url = vps_stream_url
             else:
-                # Fallback to original dlink
+                dual_links = f"\n📥 Download: [{dlink_escaped}]({dlink_escaped})\n▶️ Stream (fallback): [{vps_url_escaped}]({dlink_escaped})"
+                caption = f"{base_caption}{dual_links}\n{BRAND}"
+                video_url = dlink
+
+            # Send video with dual links
+            await context.bot.send_video(
+                chat_id=chat_id, 
+                video=video_url, 
+                caption=caption, 
+                parse_mode="MarkdownV2", 
+                supports_streaming=True
+            )
+            if admin_group_id:
+                admin_caption = f"🔎 *ADMIN REVIEW*\n{caption}\nRequested by: [{escape_markdown(user.full_name,2)}](tg://user?id={user.id})\nURL: `{escape_markdown(file_url,2)}`"
                 await context.bot.send_video(
-                    chat_id=chat_id, 
-                    video=dlink, 
-                    caption=caption, 
+                    chat_id=admin_group_id, 
+                    video=video_url, 
+                    caption=admin_caption, 
                     parse_mode="MarkdownV2", 
                     supports_streaming=True
                 )
-                if admin_group_id:
-                    admin_caption = f"🔎 *ADMIN REVIEW*\n{caption}\nRequested by: [{escape_markdown(user.full_name,2)}](tg://user?id={user.id})\nURL: `{escape_markdown(file_url,2)}`"
-                    await context.bot.send_video(
-                        chat_id=admin_group_id, 
-                        video=dlink, 
-                        caption=admin_caption, 
-                        parse_mode="MarkdownV2", 
-                        supports_streaming=True
-                    )
+            return
 
-        elif dlink.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
+        # For non-videos (unchanged)
+        if dlink.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
+            caption = f"📁 *{name_escaped}*\nSize: {size_escaped}\n{BRAND}"
             await context.bot.send_photo(chat_id=chat_id, photo=dlink, caption=caption, parse_mode="MarkdownV2")
             if admin_group_id:
                 admin_caption = f"🔎 *ADMIN REVIEW*\n{caption}\nRequested by: [{escape_markdown(user.full_name,2)}](tg://user?id={user.id})\nURL: `{escape_markdown(file_url,2)}`"
                 await context.bot.send_photo(chat_id=admin_group_id, photo=dlink, caption=admin_caption, parse_mode="MarkdownV2")
         else:
-            # Otherwise send download link
-            msg_text = f"[{escape_markdown(name, 2)}]({escape_markdown(dlink, 2)})\nSize: {escape_markdown(size, 2)}\n{BRAND}"
+            # Download link (unchanged)
+            msg_text = f"[{name_escaped}]({dlink_escaped})\nSize: {size_escaped}\n{BRAND}"
             await context.bot.send_message(chat_id, msg_text, parse_mode="MarkdownV2", disable_web_page_preview=True)
             if admin_group_id:
                 admin_msg = (
@@ -235,8 +245,8 @@ async def send_file_to_user_and_group(context, chat_id, admin_group_id, file_inf
                 await context.bot.send_message(admin_group_id, admin_msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
 
     except Exception as e:
-        # Fallback if any error occurs
-        fallback = f"[{escape_markdown(name, 2)}]({escape_markdown(dlink, 2)})\nSize: {escape_markdown(size, 2)}\n{BRAND}"
+        log.error(f"Send error for {name}: {e}")
+        fallback = f"[{name_escaped}]({dlink_escaped})\nSize: {size_escaped}\n{BRAND}"
         await context.bot.send_message(chat_id, fallback, parse_mode="MarkdownV2", disable_web_page_preview=True)
         if admin_group_id:
             admin_msg = (
@@ -246,7 +256,6 @@ async def send_file_to_user_and_group(context, chat_id, admin_group_id, file_inf
                 f"{fallback}"
             )
             await context.bot.send_message(admin_group_id, admin_msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
-        log.error(f"Send error for {name}: {e}")
 
 async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_joined(update, context):
@@ -274,12 +283,10 @@ async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data and data.get("success") and data.get("files"):
         for file_info in data["files"]:
-            # Send direct media or link to BOTH user and admin group (if set)
             await send_file_to_user_and_group(context, chat_id, ADMIN_GROUP_ID, file_info, user, file_url)
     else:
         safe_reply = escape_markdown(reply, version=2)
         await update.effective_message.reply_text(f"{safe_reply}\n{BRAND}", parse_mode="MarkdownV2")
-        return
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
