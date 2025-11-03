@@ -4,7 +4,7 @@ import time
 from collections import defaultdict
 import requests
 
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaVideo, InputMediaPhoto
 from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes
@@ -17,20 +17,16 @@ from dotenv import load_dotenv
 # -------------------------
 load_dotenv()
 
-# Required
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-# Optional but recommended
-FORCE_JOIN_CHANNEL = os.getenv("FORCE_JOIN_CHANNEL_ID")  # e.g. '@yourchannel' or channel/chat ID
+FORCE_JOIN_CHANNEL = os.getenv("FORCE_JOIN_CHANNEL_ID")
 
-# ADMIN_GROUP_ID may be unset; handle gracefully
 _admin_group_raw = os.getenv("ADMIN_GROUP_ID", "").strip()
 try:
     ADMIN_GROUP_ID = int(_admin_group_raw) if _admin_group_raw else None
 except ValueError:
-    ADMIN_GROUP_ID = None  # invalid provided value -> disable forwarding to review group
+    ADMIN_GROUP_ID = None
 
-# Parse comma-separated admin user IDs safely
 _admin_ids_raw = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = []
 for part in _admin_ids_raw.split(","):
@@ -40,32 +36,25 @@ for part in _admin_ids_raw.split(","):
     try:
         ADMIN_IDS.append(int(part))
     except ValueError:
-        pass  # skip invalid entries
+        pass
 
 BRAND = "Powered by @FNxDANGER"
 
-# Logging
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
 )
 log = logging.getLogger("terabox-bot")
 
-# -------------------------
-# Anti-spam
-# -------------------------
 USER_LAST_TIME = defaultdict(float)
-ANTI_SPAM_INTERVAL = 15  # seconds
+ANTI_SPAM_INTERVAL = 15
 
-# -------------------------
-# Messages
-# -------------------------
 WELCOME_MSG = f"""
 👋 Welcome!
 This bot fetches Terabox links with a clean, stylish flow.
 
 ✨ Features:
-- Direct Terabox link processing
+- Direct Terabox link processing, including direct media sending
 - Admin review forwarding (separate from force-join)
 - Anti-spam protection
 - Force-join channel check
@@ -74,22 +63,19 @@ This bot fetches Terabox links with a clean, stylish flow.
 """
 
 HELP_MSG = f"""**User Commands:**
-/start - Welcome & info
+/start - Welcome & Info
 /help - List commands
-/terabox <URL> - Process a Terabox link
+/terabox <URL> - Fetch direct media or links from Terabox
 
 **Admin Commands:**
-/stats - Show bot stats
-/ban <user_id> - Ban a user (stub)
-/unban <user_id> - Unban a user (stub)
-/broadcast <msg> - Send to tracked users
+/stats - Bot stats
+/ban <user_id> - Ban user (stub)
+/unban <user_id> - Unban user (stub)
+/broadcast <msg> - Broadcast to users
 
 {BRAND}
 """
 
-# -------------------------
-# Helpers
-# -------------------------
 def spam_check(update: Update) -> bool:
     user_id = update.effective_user.id
     now = time.time()
@@ -99,13 +85,8 @@ def spam_check(update: Update) -> bool:
     return False
 
 async def is_joined(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """
-    Check membership in the force-join channel.
-    Returns True if no channel is configured, or on API access errors (fails open),
-    so users are not blocked by misconfig. Place your policy here as desired.
-    """
     if not FORCE_JOIN_CHANNEL:
-        return True  # no force-join configured
+        return True
 
     user_id = update.effective_user.id
     try:
@@ -113,14 +94,9 @@ async def is_joined(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         status = getattr(member, "status", "")
         return status in ["member", "administrator", "creator"]
     except (BadRequest, Forbidden) as e:
-        # Typical cases:
-        # - Bot not admin in channel
-        # - Channel is private and bot can’t read it
-        # Choose policy: treat as not-joined to enforce subscription
         log.warning("get_chat_member failed: %s", e)
         return False
     except TelegramError as e:
-        # Network or other transient errors: allow usage to avoid lockouts
         log.error("TelegramError in get_chat_member: %s", e)
         return True
 
@@ -147,9 +123,6 @@ def fetch_terabox(url: str) -> str:
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
-# -------------------------
-# Handlers
-# -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(WELCOME_MSG, parse_mode="Markdown")
 
@@ -157,44 +130,92 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(HELP_MSG, parse_mode="Markdown")
 
 async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Force-join gate
     if not await is_joined(update, context):
         await prompt_force_join(update)
         return
 
-    # Anti-spam
     if spam_check(update):
         await update.effective_message.reply_text(f"⏱ Please wait before sending another request.\n{BRAND}")
         return
 
-    # Validate args
     if not context.args:
         await update.effective_message.reply_text(f"❌ Please provide a Terabox URL.\n{BRAND}")
         return
 
     file_url = context.args[0].strip()
     reply = fetch_terabox(file_url)
-    
-    # Escape the reply so Markdown entities do not break message formatting
-    from telegram.helpers import escape_markdown
-    safe_reply = escape_markdown(reply, version=2)
-    
-    await update.effective_message.reply_text(f"{safe_reply}\n{BRAND}", parse_mode="MarkdownV2")
 
-    # Forward to review group (if configured)
-    if ADMIN_GROUP_ID is not None:
-        try:
-            user = update.effective_user
-            await context.bot.send_message(
-                ADMIN_GROUP_ID,
-                f"🔎 *New File Request:*\n"
-                f"User: [{escape_markdown(user.full_name, 2)}](tg://user?id={user.id})\n"
-                f"URL: `{escape_markdown(file_url, 2)}`\n\n{BRAND}",
-                parse_mode="MarkdownV2",
-                disable_web_page_preview=True,
-            )
-        except TelegramError as e:
-            log.warning("Failed to forward to ADMIN_GROUP_ID %s: %s", ADMIN_GROUP_ID, e)
+    import json
+    try:
+        data = json.loads(reply)
+    except Exception:
+        data = None
+
+    user = update.effective_user
+
+    if data and data.get("success") and data.get("files"):
+        for file_info in data["files"]:
+            name = file_info.get("name", "File")
+            size = file_info.get("size", "")
+            dlink = file_info.get("dlink", "")
+            thumbnail = file_info.get("thumbnail", "")
+            isdir = file_info.get("isdir", False)
+
+            caption = f"📁 *{escape_markdown(name,2)}*\nSize: {escape_markdown(size,2)}\n{BRAND}"
+
+            # Only send direct media, not folders
+            if isdir:
+                # For folders, send a clickable link
+                msg_text = f"Folder: [{escape_markdown(name,2)}]({escape_markdown(dlink,2)})\nSize: {escape_markdown(size,2)}\n{BRAND}"
+                await update.effective_message.reply_text(msg_text, parse_mode="MarkdownV2", disable_web_page_preview=False)
+                if ADMIN_GROUP_ID:
+                    admin_msg = (
+                        f"🔎 *New File Request:*\n"
+                        f"User: [{escape_markdown(user.full_name, 2)}](tg://user?id={user.id})\n"
+                        f"URL: `{escape_markdown(file_url, 2)}`\n\n"
+                        f"{msg_text}"
+                    )
+                    await context.bot.send_message(ADMIN_GROUP_ID, admin_msg, parse_mode="MarkdownV2")
+            else:
+                # For files, try to send media/video/photo files
+                try:
+                    if dlink.endswith((".mp4", ".mkv", ".avi", ".mov", ".webm")):
+                        await update.effective_message.reply_video(video=dlink, caption=caption, parse_mode="MarkdownV2", supports_streaming=True)
+                    elif dlink.endswith((".jpg", ".jpeg", ".png", ".gif")):
+                        await update.effective_message.reply_photo(photo=dlink, caption=caption, parse_mode="MarkdownV2")
+                    else:
+                        # Fallback: send direct download link as clickable text
+                        msg_text = f"[{escape_markdown(name,2)}]({escape_markdown(dlink,2)})\nSize: {escape_markdown(size,2)}\n{BRAND}"
+                        await update.effective_message.reply_text(msg_text, parse_mode="MarkdownV2", disable_web_page_preview=True)
+
+                    if ADMIN_GROUP_ID:
+                        admin_msg = (
+                            f"🔎 *New File Request:*\n"
+                            f"User: [{escape_markdown(user.full_name, 2)}](tg://user?id={user.id})\n"
+                            f"URL: `{escape_markdown(file_url, 2)}`\n\n"
+                            f"{caption}\n{dlink}"
+                        )
+                        await context.bot.send_message(ADMIN_GROUP_ID, admin_msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
+                except Exception as e:
+                    # In case sending media fails, send the link as text
+                    msg_text = f"[{escape_markdown(name,2)}]({escape_markdown(dlink,2)})\nSize: {escape_markdown(size,2)}\n{BRAND}"
+                    await update.effective_message.reply_text(msg_text, parse_mode="MarkdownV2", disable_web_page_preview=True)
+                    if ADMIN_GROUP_ID:
+                        admin_msg = (
+                            f"🔎 *New File Request (fallback):*\n"
+                            f"User: [{escape_markdown(user.full_name, 2)}](tg://user?id={user.id})\n"
+                            f"URL: `{escape_markdown(file_url, 2)}`\n\n"
+                            f"{msg_text}"
+                        )
+                        await context.bot.send_message(ADMIN_GROUP_ID, admin_msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
+
+    else:
+        # fallback: send raw API response (escaped)
+        from telegram.helpers import escape_markdown
+        safe_reply = escape_markdown(reply, version=2)
+        await update.effective_message.reply_text(f"{safe_reply}\n{BRAND}", parse_mode="MarkdownV2")
+
+    return
 
 # Admin commands (stubs for ban/unban storage)
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -231,7 +252,6 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("Usage: /broadcast <message>")
         return
     msg = " ".join(context.args)
-    # Send to every tracked user (seen once in this runtime)
     for uid in list(USER_LAST_TIME.keys()):
         try:
             await context.bot.send_message(uid, f"{msg}\n{BRAND}")
@@ -239,15 +259,9 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     await update.effective_message.reply_text("Broadcast sent.")
 
-# -------------------------
-# Error handler
-# -------------------------
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.exception("Unhandled exception: %s", context.error)
 
-# -------------------------
-# Entrypoint
-# -------------------------
 def main():
     if not TELEGRAM_TOKEN:
         raise RuntimeError("TELEGRAM_TOKEN is not set. Check your .env.")
