@@ -3,47 +3,93 @@ import logging
 import time
 from collections import defaultdict
 import requests
+
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    filters, ContextTypes, CallbackQueryHandler
+    ApplicationBuilder, CommandHandler, ContextTypes
 )
 from dotenv import load_dotenv
 
+# -------------------------
+# Setup & configuration
+# -------------------------
 load_dotenv()
 
+# Required
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-FORCE_JOIN_CHANNEL = os.getenv("FORCE_JOIN_CHANNEL_ID") # '@yourchannel'
-ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID")) # The group ID for file reviews
-ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(',')] # Comma-separated list of admin user IDs
+
+# Optional but recommended
+FORCE_JOIN_CHANNEL = os.getenv("FORCE_JOIN_CHANNEL_ID")  # e.g. '@yourchannel' or channel/chat ID
+
+# ADMIN_GROUP_ID may be unset; handle gracefully
+_admin_group_raw = os.getenv("ADMIN_GROUP_ID", "").strip()
+try:
+    ADMIN_GROUP_ID = int(_admin_group_raw) if _admin_group_raw else None
+except ValueError:
+    ADMIN_GROUP_ID = None  # invalid provided value -> disable forwarding to review group
+
+# Parse comma-separated admin user IDs safely
+_admin_ids_raw = os.getenv("ADMIN_IDS", "")
+ADMIN_IDS = []
+for part in _admin_ids_raw.split(","):
+    part = part.strip()
+    if not part:
+        continue
+    try:
+        ADMIN_IDS.append(int(part))
+    except ValueError:
+        pass  # skip invalid entries
+
 BRAND = "Powered by @FNxDANGER"
 
-# Anti-spam settings
+# Logging
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=logging.INFO,
+)
+log = logging.getLogger("terabox-bot")
+
+# -------------------------
+# Anti-spam
+# -------------------------
 USER_LAST_TIME = defaultdict(float)
-ANTI_SPAM_INTERVAL = 15 # seconds
+ANTI_SPAM_INTERVAL = 15  # seconds
 
-# Stylish greeting message
-WELCOME_MSG = """
-👋 Welcome!  
-This bot helps you fetch files from Terabox instantly with an elegant UI.
+# -------------------------
+# Messages
+# -------------------------
+WELCOME_MSG = f"""
+👋 Welcome!
+This bot fetches Terabox links with a clean, stylish flow.
 
-✨ **Features:**
-- Direct Terabox download links
-- Strong anti-spam shields
-- You must join our main channel to use the bot
+✨ Features:
+- Direct Terabox link processing
+- Admin review forwarding (separate from force-join)
+- Anti-spam protection
+- Force-join channel check
 
-{}
+{BRAND}
+"""
 
-""".format(BRAND)
+HELP_MSG = f"""**User Commands:**
+/start - Welcome & info
+/help - List commands
+/terabox <URL> - Process a Terabox link
 
-def is_joined(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check user membership in force-join channel."""
-    user_id = update.effective_user.id
-    chat_member = context.bot.get_chat_member(FORCE_JOIN_CHANNEL, user_id)
-    return chat_member.status in ['member', 'administrator', 'creator']
+**Admin Commands:**
+/stats - Show bot stats
+/ban <user_id> - Ban a user (stub)
+/unban <user_id> - Unban a user (stub)
+/broadcast <msg> - Send to tracked users
 
-def spam_check(update: Update):
-    """Basic anti-spam mechanism."""
+{BRAND}
+"""
+
+# -------------------------
+# Helpers
+# -------------------------
+def spam_check(update: Update) -> bool:
     user_id = update.effective_user.id
     now = time.time()
     if now - USER_LAST_TIME[user_id] < ANTI_SPAM_INTERVAL:
@@ -51,109 +97,157 @@ def spam_check(update: Update):
     USER_LAST_TIME[user_id] = now
     return False
 
-async def force_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Detect if user is not joined and force them to join."""
-    if is_joined(update, context):
+async def is_joined(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Check membership in the force-join channel.
+    Returns True if no channel is configured, or on API access errors (fails open),
+    so users are not blocked by misconfig. Place your policy here as desired.
+    """
+    if not FORCE_JOIN_CHANNEL:
+        return True  # no force-join configured
+
+    user_id = update.effective_user.id
+    try:
+        member = await context.bot.get_chat_member(FORCE_JOIN_CHANNEL, user_id)
+        status = getattr(member, "status", "")
+        return status in ["member", "administrator", "creator"]
+    except (BadRequest, Forbidden) as e:
+        # Typical cases:
+        # - Bot not admin in channel
+        # - Channel is private and bot can’t read it
+        # Choose policy: treat as not-joined to enforce subscription
+        log.warning("get_chat_member failed: %s", e)
         return False
+    except TelegramError as e:
+        # Network or other transient errors: allow usage to avoid lockouts
+        log.error("TelegramError in get_chat_member: %s", e)
+        return True
+
+async def prompt_force_join(update: Update):
+    if not FORCE_JOIN_CHANNEL:
+        return
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("JOIN CHANNEL 🔗", url=f'https://t.me/{FORCE_JOIN_CHANNEL.lstrip("@")}')]])
-    await update.message.reply_text(
-        f"To use this bot, you must join our channel first!\n{BRAND}", reply_markup=keyboard
+        [[InlineKeyboardButton("JOIN CHANNEL 🔗", url=f'https://t.me/{str(FORCE_JOIN_CHANNEL).lstrip("@")}')]]
     )
-    return True
+    await update.effective_message.reply_text(
+        f"To use this bot, please join our channel first.\n{BRAND}",
+        reply_markup=keyboard
+    )
 
 def fetch_terabox(url: str) -> str:
     api_url = f"https://teraboxapi.alphaapi.workers.dev/?url={url}"
     try:
-        response = requests.get(api_url, timeout=10)
+        response = requests.get(api_url, timeout=15)
         response.raise_for_status()
         return response.text
     except requests.RequestException as e:
         return f"Error contacting Terabox API: {e}"
 
-# User commands
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
+
+# -------------------------
+# Handlers
+# -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(WELCOME_MSG, parse_mode='Markdown')
+    await update.effective_message.reply_text(WELCOME_MSG, parse_mode="Markdown")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "**User Commands:**\n"
-        "/start  - Show welcome and info\n"
-        "/help   - List user commands\n"
-        "/terabox <URL> - Get file from Terabox\n"
-        "\n**Admin Commands:**\n"
-        "/stats   - Show bot stats\n"
-        "/ban <user_id> - Ban a user\n"
-        "/unban <user_id> - Unban user\n"
-        "/broadcast <msg> - Send to all users\n"
-        f"\n{BRAND}",
-        parse_mode='Markdown'
-    )
+    await update.effective_message.reply_text(HELP_MSG, parse_mode="Markdown")
 
 async def terabox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await force_join(update, context):
-        return
-    if spam_check(update):
-        await update.message.reply_text("⏱ Please wait before sending another request. " + BRAND)
-        return
-    if not context.args:
-        await update.message.reply_text('❌ Please provide a Terabox file URL.\nPowered by @FNxDANGER')
+    # Force-join gate
+    if not await is_joined(update, context):
+        await prompt_force_join(update)
         return
 
-    file_url = context.args[0]
+    # Anti-spam
+    if spam_check(update):
+        await update.effective_message.reply_text(f"⏱ Please wait before sending another request.\n{BRAND}")
+        return
+
+    # Validate args
+    if not context.args:
+        await update.effective_message.reply_text(f"❌ Please provide a Terabox URL.\n{BRAND}")
+        return
+
+    file_url = context.args[0].strip()
     reply = fetch_terabox(file_url)
-    await update.message.reply_text(f"{reply}\n{BRAND}", parse_mode='Markdown')
-    # Forward request info to the review group for moderation (message, username, etc.)
-    await context.bot.send_message(
-        ADMIN_GROUP_ID,
-        f"🔎 *New File Request:*\nUser: [{update.effective_user.full_name}](tg://user?id={update.effective_user.id})\nURL: {file_url}\n\n{BRAND}",
-        parse_mode='Markdown'
+    await update.effective_message.reply_text(f"{reply}\n{BRAND}", parse_mode="Markdown")
+
+    # Forward to review group (if configured)
+    if ADMIN_GROUP_ID is not None:
+        try:
+            user = update.effective_user
+            await context.bot.send_message(
+                ADMIN_GROUP_ID,
+                f"🔎 *New File Request:*\n"
+                f"User: [{user.full_name}](tg://user?id={user.id})\n"
+                f"URL: {file_url}\n\n{BRAND}",
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+            )
+        except TelegramError as e:
+            log.warning("Failed to forward to ADMIN_GROUP_ID %s: %s", ADMIN_GROUP_ID, e)
+
+# Admin commands (stubs for ban/unban storage)
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("Access denied.")
+        return
+    await update.effective_message.reply_text(
+        f"Bot is running. Tracked users: {len(USER_LAST_TIME)}.\n{BRAND}"
     )
 
-# Admin commands
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("Access denied.")
-        return
-    await update.message.reply_text("Bot is running. Users tracked: {}.\n{}".format(len(USER_LAST_TIME), BRAND))
-
 async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("Access denied.")
-        return
-    if context.args:
-        banned_id = int(context.args[0])
-        # you can add ban logic to a persistent store/database
-        await update.message.reply_text(f"User {banned_id} banned.\n{BRAND}")
-
-async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("Access denied.")
-        return
-    if context.args:
-        unbanned_id = int(context.args[0])
-        # you can add unban logic to a persistent store/database
-        await update.message.reply_text(f"User {unbanned_id} unbanned.\n{BRAND}")
-
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("Access denied.")
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("Access denied.")
         return
     if not context.args:
-        await update.message.reply_text("Usage: /broadcast <message>")
+        await update.effective_message.reply_text("Usage: /ban <user_id>")
+        return
+    await update.effective_message.reply_text(f"User {context.args[0]} banned (stub).\n{BRAND}")
+
+async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("Access denied.")
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /unban <user_id>")
+        return
+    await update.effective_message.reply_text(f"User {context.args[0]} unbanned (stub).\n{BRAND}")
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("Access denied.")
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /broadcast <message>")
         return
     msg = " ".join(context.args)
-    for uid in USER_LAST_TIME: # Send to each tracked user
+    # Send to every tracked user (seen once in this runtime)
+    for uid in list(USER_LAST_TIME.keys()):
         try:
-            await context.bot.send_message(uid, msg + "\n" + BRAND)
-        except Exception:
+            await context.bot.send_message(uid, f"{msg}\n{BRAND}")
+        except TelegramError:
             pass
-    await update.message.reply_text("Broadcast sent.")
+    await update.effective_message.reply_text("Broadcast sent.")
 
-# You can implement review-mode toggles, audit logs etc as needed.
+# -------------------------
+# Error handler
+# -------------------------
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log.exception("Unhandled exception: %s", context.error)
 
+# -------------------------
+# Entrypoint
+# -------------------------
 def main():
+    if not TELEGRAM_TOKEN:
+        raise RuntimeError("TELEGRAM_TOKEN is not set. Check your .env.")
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("terabox", terabox_cmd))
@@ -161,9 +255,9 @@ def main():
     app.add_handler(CommandHandler("ban", ban))
     app.add_handler(CommandHandler("unban", unban))
     app.add_handler(CommandHandler("broadcast", broadcast))
-    # Add more admin/user commands/edit handlers
 
-    app.run_polling()
+    app.add_error_handler(error_handler)
+    app.run_polling(close_loop=False)
 
 if __name__ == "__main__":
     main()
